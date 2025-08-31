@@ -1,0 +1,167 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    String             @id @default(uuid())
+  email                 String             @unique
+  name                  String?
+  emailVerified         Boolean
+  image                 String?
+  role                  UserRole           @default(USER)
+  createdAt             DateTime
+  updatedAt             DateTime
+  subscriptionStatus    SubscriptionStatus @default(FREE)
+  subscriptionType      SubscriptionType?
+  subscriptionId        String?
+  subscriptionExpiresAt DateTime?
+  dodoCustomerId        String?            @unique
+  sessions              Session[]
+  accounts              Account[]
+  subscriptions         Subscription[]
+
+  @@map("user")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum SubscriptionStatus {
+  FREE
+  PREMIUM
+}
+
+enum SubscriptionType {
+  MONTHLY
+  YEARLY
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime
+  updatedAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime
+  updatedAt             DateTime
+
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime?
+  updatedAt  DateTime?
+
+  @@map("verification")
+}
+
+model Deal {
+  id                  Int           @id @default(autoincrement())
+  redditId            String        @unique
+  originalTitle       String
+  url                 String
+  score               Int
+  subreddit           String
+  images              String[] // Array of image URLs
+  isSale              Boolean
+  lowQuality          Boolean       @default(false)
+  professionalSummary String?
+  monthlyRevenue      String?
+  askingPrice         String?
+  userCount           String?
+  link                String[] // Array of links
+  otherImportantStuff String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  dealOfTheDay        DealOfTheDay?
+
+  @@map("deal")
+}
+
+model DealOfTheDay {
+  id        Int      @id @default(autoincrement())
+  dealId    Int      @unique
+  date      DateTime @unique @default(now())
+  setBy     String? // Admin who set this
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deal      Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@map("dealOfTheDay")
+}
+
+model DailyHomePageDeals {
+  id        Int      @id @default(autoincrement())
+  date      DateTime @unique // Format: YYYY-MM-DD 00:00:00
+  dealIds   Int[] // Array of exactly 9 deal IDs
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("dailyHomePageDeals")
+}
+
+model Subscription {
+  id                 Int               @id @default(autoincrement())
+  dodoSubscriptionId String            @unique
+  status             SubscriptionState
+  currentPeriodEnd   DateTime?
+  userId             String
+  user               User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@map("subscription")
+}
+
+model RawDeal {
+  redditId   String   @id
+  title      String
+  url        String
+  score      Int
+  subreddit  String
+  selftext   String?
+  images     String[]
+  createdAt  DateTime @default(now())
+  processed  Boolean  @default(false)
+  @@map("rawDeal")
+}
+
+enum SubscriptionState {
+  ACTIVE
+  FAILED
+  CANCELED
+  EXPIRED
+}
