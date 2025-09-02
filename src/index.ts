@@ -1,6 +1,7 @@
   import { Hono } from 'hono'
   import { PrismaClient } from '@prisma/client/edge'
   import { withAccelerate } from '@prisma/extension-accelerate'
+  import { GoogleGenerativeAI } from '@google/generative-ai'
 
   // Worker bindings
   type Bindings = {
@@ -431,6 +432,150 @@ Post Content: ${post.selftext ?? ''}
   })
 
   // -------------------------
+  // Embedding Functions
+  // -------------------------
+  function generateEmbeddingText(deal: {
+    originalTitle: string;
+    professionalSummary?: string | null;
+    otherImportantStuff?: string | null;
+    monthlyRevenue?: string | null;
+    askingPrice?: string | null;
+    userCount?: string | null;
+  }): string {
+    const parts: string[] = [deal.originalTitle];
+
+    if (deal.professionalSummary) {
+      parts.push(deal.professionalSummary);
+    }
+    if (deal.otherImportantStuff) {
+      parts.push(deal.otherImportantStuff);
+    }
+    if (deal.monthlyRevenue) {
+      parts.push(`Monthly Revenue: ${deal.monthlyRevenue}`);
+    }
+    if (deal.askingPrice) {
+      parts.push(`Asking Price: ${deal.askingPrice}`);
+    }
+    if (deal.userCount) {
+      parts.push(`User Count: ${deal.userCount}`);
+    }
+
+    return parts.join(" ");
+  }
+
+  const processEmbeddings = async (env: Bindings, batchSize: number = 3) => {
+    const prisma = new PrismaClient({
+      datasourceUrl: env.DATABASE_URL,
+    }).$extends(withAccelerate())
+
+    // Find deals without embeddings using raw SQL
+   const dealsWithoutEmbeddings = await prisma.$queryRawUnsafe<{
+  id: string;
+  originalTitle: string;
+  professionalSummary: string | null;
+  otherImportantStuff: string | null;
+  monthlyRevenue: string | null;
+  askingPrice: string | null;
+  userCount: string | null;
+}[]>(`
+  SELECT id, "originalTitle", "professionalSummary", "otherImportantStuff",
+         "monthlyRevenue", "askingPrice", "userCount"
+  FROM "deal"
+  WHERE embedding IS NULL
+    AND "professionalSummary" IS NOT NULL
+    AND "otherImportantStuff" IS NOT NULL
+`);
+
+
+
+    if (dealsWithoutEmbeddings.length === 0) {
+      console.log('No deals without embeddings found')
+      return {
+        message: 'No deals without embeddings found',
+        processed: 0,
+        failed: 0
+      }
+    }
+
+    console.log(`Processing embeddings for ${dealsWithoutEmbeddings.length} deals`)
+
+    const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY)
+    const model = genAI.getGenerativeModel({ model: "embedding-001" })
+
+    let processed = 0
+    let failed = 0
+
+    for (const deal of dealsWithoutEmbeddings) {
+      try {
+        const text = generateEmbeddingText(deal)
+        console.log(`Generating embedding for deal ${deal.id}: ${text.substring(0, 100)}...`)
+
+        // Generate embedding using Gemini
+        const result = await model.embedContent({
+          content: {
+            role: "user",
+            parts: [{ text }],
+          },
+        })
+
+        const embedding = result.embedding.values
+
+        // Store embedding in database using raw SQL
+        await prisma.$executeRawUnsafe(
+          `UPDATE "deal" SET embedding = $1 WHERE id = $2`,
+          embedding,
+          deal.id
+        )
+
+        console.log(`✅ Updated embedding for Deal #${deal.id}`)
+        processed++
+      } catch (error) {
+        console.error(`❌ Failed to generate embedding for Deal #${deal.id}:`, error)
+        failed++
+      }
+    }
+
+    console.log(`Embedding processing completed: ${processed} processed, ${failed} failed`)
+    return {
+      message: 'Embedding processing completed',
+      processed,
+      failed,
+      totalDeals: dealsWithoutEmbeddings.length
+    }
+  }
+
+  app.get('/embeddings', async (c) => {
+    const prisma = getPrisma(c)
+
+    // Check if there are deals without embeddings using raw SQL
+    const countResult = await prisma.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*) as count 
+      FROM "deal" 
+      WHERE embedding IS NULL 
+        AND "professionalSummary" IS NOT NULL 
+        AND "otherImportantStuff" IS NOT NULL
+    `
+
+    const dealsWithoutEmbeddings = Number(countResult[0].count)
+
+    if (dealsWithoutEmbeddings === 0) {
+      return c.json({
+        message: 'No deals without embeddings found',
+        processed: 0,
+        failed: 0,
+        totalDeals: 0
+      })
+    }
+
+    console.log(`Found ${dealsWithoutEmbeddings} deals without embeddings`)
+
+    // Process embeddings
+    const result = await processEmbeddings(c.env, 3)
+
+    return c.json(result)
+  })
+
+  // -------------------------
   // Cleanup Endpoint
   // -------------------------
   const cleanupProcessedRawDeals = async (env: Bindings) => {
@@ -497,6 +642,11 @@ Post Content: ${post.selftext ?? ''}
           console.log('Running bi-hourly deal processing...')
           const result = await processDeals(env, 3)
           console.log(`Bi-hourly processing completed:`, result.summary)
+        } else if (cron === '30 1,4,6,9,11,14,16,19,21 * * *') {
+          // Process embeddings every ~2.5 hours (9 times per day)
+          console.log('Running embedding processing...')
+          const result = await processEmbeddings(env, 3)
+          console.log(`Embedding processing completed:`, result)
         } else if (cron === '0 6,18 * * *') {
           // Cleanup processed raw deals twice a day (6 AM and 6 PM UTC)
           console.log('Running cleanup of processed raw deals...')
