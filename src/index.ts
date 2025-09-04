@@ -576,6 +576,197 @@ Post Content: ${post.selftext ?? ''}
   })
 
   // -------------------------
+  // Daily Deal Selection Functions
+  // -------------------------
+  const setDealOfTheDay = async (env: Bindings) => {
+    const prisma = new PrismaClient({
+      datasourceUrl: env.DATABASE_URL,
+    }).$extends(withAccelerate())
+
+    try {
+      // Get IDs of deals that have already been deal of the day
+      const usedDealIds = await prisma.dealOfTheDay.findMany({
+        select: { dealId: true }
+      })
+      
+      const usedIds = usedDealIds.map(d => d.dealId)
+
+      // Find a good quality deal that hasn't been deal of the day
+      const availableDeals = await prisma.deal.findMany({
+        where: {
+          AND: [
+            { lowQuality: false },
+            { isSale: true },
+            { professionalSummary: { not: null } },
+            { otherImportantStuff: { not: null } },
+            ...(usedIds.length > 0 ? [{ id: { notIn: usedIds } }] : [])
+          ]
+        },
+        orderBy: { score: 'desc' },
+        take: 10
+      })
+
+      if (availableDeals.length === 0) {
+        console.log('No available deals for deal of the day')
+        return { success: false, message: 'No available deals found' }
+      }
+
+      // Randomly select from top 10 deals
+      const selectedDeal = availableDeals[Math.floor(Math.random() * availableDeals.length)]
+
+      // Check if there's already a deal of the day for today
+      const today = new Date()
+      today.setUTCHours(0, 0, 0, 0)
+      
+      const existingDealOfDay = await prisma.dealOfTheDay.findFirst({
+        where: {
+          date: {
+            gte: today,
+            lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
+          }
+        }
+      })
+
+      if (existingDealOfDay) {
+        // Update existing deal of the day
+        await prisma.dealOfTheDay.update({
+          where: { id: existingDealOfDay.id },
+          data: {
+            dealId: selectedDeal.id,
+            date: new Date(),
+            setBy: 'auto-cron'
+          }
+        })
+      } else {
+        // Create new deal of the day
+        await prisma.dealOfTheDay.create({
+          data: {
+            dealId: selectedDeal.id,
+            date: new Date(),
+            setBy: 'auto-cron'
+          }
+        })
+      }
+
+      console.log(`✅ Set deal of the day: Deal #${selectedDeal.id} - ${selectedDeal.originalTitle}`)
+      return { 
+        success: true, 
+        dealId: selectedDeal.id, 
+        title: selectedDeal.originalTitle 
+      }
+    } catch (error) {
+      console.error('Error setting deal of the day:', error)
+      return { success: false, message: 'Error setting deal of the day' }
+    }
+  }
+
+  const setHomePageDeals = async (env: Bindings) => {
+    const prisma = new PrismaClient({
+      datasourceUrl: env.DATABASE_URL,
+    }).$extends(withAccelerate())
+
+    try {
+      // Delete yesterday's home page deals (cleanup)
+      const yesterday = new Date()
+      yesterday.setDate(yesterday.getDate() - 1)
+      yesterday.setUTCHours(0, 0, 0, 0)
+      
+      await prisma.dailyHomePageDeals.deleteMany({
+        where: {
+          date: {
+            lt: new Date(new Date().setUTCHours(0, 0, 0, 0))
+          }
+        }
+      })
+
+      // Get quality deals for home page
+      const qualityDeals = await prisma.deal.findMany({
+        
+        select: { id: true, originalTitle: true },
+        orderBy: { score: 'desc' },
+        take: 50 // Get more deals to randomly select from
+      })
+
+      if (qualityDeals.length < 9) {
+        console.log(`Not enough quality deals for home page (found ${qualityDeals.length}, need 9)`)
+        return { 
+          success: false, 
+          message: `Not enough quality deals (found ${qualityDeals.length}, need 9)` 
+        }
+      }
+
+      // Randomly shuffle and select 9 deals
+      const shuffled = qualityDeals.sort(() => 0.5 - Math.random())
+      const selectedDeals = shuffled.slice(0, 9)
+      const selectedDealIds = selectedDeals.map(d => d.id)
+
+      // Check if there are already home page deals for today
+      const today = new Date()
+      today.setUTCHours(0, 0, 0, 0)
+
+      const existingHomePageDeals = await prisma.dailyHomePageDeals.findFirst({
+        where: {
+          date: {
+            gte: today,
+            lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
+          }
+        }
+      })
+
+      if (existingHomePageDeals) {
+        // Update existing home page deals
+        await prisma.dailyHomePageDeals.update({
+          where: { id: existingHomePageDeals.id },
+          data: {
+            dealIds: selectedDealIds,
+            date: new Date()
+          }
+        })
+      } else {
+        // Create new home page deals
+        await prisma.dailyHomePageDeals.create({
+          data: {
+            date: new Date(),
+            dealIds: selectedDealIds
+          }
+        })
+      }
+
+      console.log(`✅ Set home page deals: ${selectedDealIds.length} deals selected`)
+      console.log(`Deal titles: ${selectedDeals.map(d => d.originalTitle.substring(0, 50)).join(', ')}`)
+      
+      return { 
+        success: true, 
+        dealCount: selectedDealIds.length,
+        dealIds: selectedDealIds,
+        titles: selectedDeals.map(d => d.originalTitle)
+      }
+    } catch (error) {
+      console.error('Error setting home page deals:', error)
+      return { success: false, message: 'Error setting home page deals' }
+    }
+  }
+
+  const setDailyDeals = async (env: Bindings) => {
+    console.log('Starting daily deal selection process...')
+    
+    const dealOfDayResult = await setDealOfTheDay(env)
+    const homePageResult = await setHomePageDeals(env)
+
+    return {
+      dealOfTheDay: dealOfDayResult,
+      homePageDeals: homePageResult,
+      timestamp: new Date().toISOString()
+    }
+  }
+
+  app.get('/daily-deals', async (c) => {
+    console.log('Manual trigger: Setting daily deals')
+    const result = await setDailyDeals(c.env)
+    return c.json(result)
+  })
+
+  // -------------------------
   // Cleanup Endpoint
   // -------------------------
   const cleanupProcessedRawDeals = async (env: Bindings) => {
@@ -637,6 +828,11 @@ Post Content: ${post.selftext ?? ''}
           console.log('Running daily Reddit fetch...')
           const newPosts = await fetchRedditPosts(env)
           console.log(`Daily fetch completed: ${newPosts.length} new posts`)
+        } else if (cron === '5 0 * * *') {
+          // Set daily deals at 12:05 AM UTC (after fetch completes)
+          console.log('Running daily deal selection...')
+          const result = await setDailyDeals(env)
+          console.log(`Daily deals set:`, result)
         } else if (cron === '0 */2 * * *') {
           // Process every 2 hours (3 deals per run = ~36 deals per day)
           console.log('Running bi-hourly deal processing...')
