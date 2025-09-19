@@ -1,12 +1,14 @@
 import { Hono } from 'hono'
 import { PrismaClient } from '@prisma/client/edge'
 import { withAccelerate } from '@prisma/extension-accelerate'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenAI } from "@google/genai";
+
 
 // Worker bindings
 type Bindings = {
   DATABASE_URL: string
   GEMINI_API_KEY: string
+  GEMINI_API_KEY1: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -468,7 +470,7 @@ const processEmbeddings = async (env: Bindings, batchSize: number = 3) => {
     datasourceUrl: env.DATABASE_URL,
   }).$extends(withAccelerate())
 
-  // Find deals without embeddings using raw SQL
+  // Find deals without embeddings using raw SQL with LIMIT
   const dealsWithoutEmbeddings = await prisma.$queryRawUnsafe<{
     id: string;
     originalTitle: string;
@@ -484,9 +486,8 @@ const processEmbeddings = async (env: Bindings, batchSize: number = 3) => {
   WHERE embedding IS NULL
     AND "professionalSummary" IS NOT NULL
     AND "otherImportantStuff" IS NOT NULL
+  LIMIT ${batchSize}
 `);
-
-
 
   if (dealsWithoutEmbeddings.length === 0) {
     console.log('No deals without embeddings found')
@@ -497,10 +498,11 @@ const processEmbeddings = async (env: Bindings, batchSize: number = 3) => {
     }
   }
 
-  console.log(`Processing embeddings for ${dealsWithoutEmbeddings.length} deals`)
+  console.log(`Processing embeddings for ${dealsWithoutEmbeddings.length} deals (batch size: ${batchSize})`)
 
-  const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY)
-  const model = genAI.getGenerativeModel({ model: "embedding-001" })
+  const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY1! })
+  // const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY1!)
+  // const model = genAI.getGenerativeModel({ model: "embedding-001" })
 
   let processed = 0
   let failed = 0
@@ -511,14 +513,23 @@ const processEmbeddings = async (env: Bindings, batchSize: number = 3) => {
       console.log(`Generating embedding for deal ${deal.id}: ${text.substring(0, 100)}...`)
 
       // Generate embedding using Gemini
-      const result = await model.embedContent({
-        content: {
-          role: "user",
-          parts: [{ text }],
-        },
+      // const result = await model.embedContent({
+      //   content: {
+      //     role: "user",
+      //     parts: [{ text }],
+      //   },
+      // })
+
+      const result = await ai.models.embedContent({
+        model: 'gemini-embedding-001',
+        contents: [text],
+        config: {
+          outputDimensionality: 768
+        }
       })
 
-      const embedding = result.embedding.values
+      const embedding = result?.embeddings?.[0]?.values
+      console.log(embedding?.length === 768)
 
       // Store embedding in database using raw SQL
       await prisma.$executeRawUnsafe(
@@ -570,7 +581,7 @@ app.get('/embeddings', async (c) => {
   console.log(`Found ${dealsWithoutEmbeddings} deals without embeddings`)
 
   // Process embeddings
-  const result = await processEmbeddings(c.env, 3)
+  const result = await processEmbeddings(c.env, 60)
 
   return c.json(result)
 })
